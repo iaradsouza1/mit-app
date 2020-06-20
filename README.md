@@ -1,10 +1,10 @@
 # mit-app
 
 # Create env
-conda env create -f environment.yml
+`conda env create -f environment.yml`
 
 # Activate env
-conda activate mit-covid
+`conda activate mit-covid`
 
 # Run app
-streamlit run teste.py
+`streamlit run teste.py`
