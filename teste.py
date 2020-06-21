@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
 import downloaddata
+import geopandas
 
 from matplotlib.dates import date2num, num2date
 from matplotlib import dates as mdates
@@ -14,10 +15,17 @@ from datetime import date
 from scipy import stats as sps
 from scipy.interpolate import interp1d
 
-# Download most recent data
+# Download the most recent data
 downloaddata.main()
 
 FILE = "data/Covid-19-Brasil_" + str(date.today()) + ".csv"
+
+FILTERED_REGIONS = [
+    'Virgin Islands',
+    'American Samoa',
+    'Northern Mariana Islands',
+    'Guam',
+    'Puerto Rico']
 
 states_names = (
 	'PE','RR', 'AC','MT', 'MS', 'GO', 
@@ -26,6 +34,45 @@ states_names = (
 	'MG', 'PA', 'PB', 'PI', 'RJ', 'RN', 
 	'RO', 'SE', 'TO'
 )
+
+no_lockdown = [
+    'PI',
+    'RR',
+    'AC',
+    'MT',
+    'MS',
+    'GO',
+    'PR',
+    'RS',
+    'SC',
+    'SP'
+]
+partial_lockdown = [
+ 'AL',
+ 'AM',
+ 'AP',
+ 'BA',
+ 'CE',
+ 'DF',
+ 'ES',
+ 'MA',
+ 'MG',
+ 'PA',
+ 'PB',
+ 'PE',
+ 'RJ',
+ 'RN',
+ 'RO',
+ 'SE',
+ 'TO'
+]
+
+FULL_COLOR = [.7,.7,.7]
+NONE_COLOR = [179/255,35/255,14/255]
+PARTIAL_COLOR = [.5,.5,.5]
+ERROR_BAR_COLOR = [.3,.3,.3]
+
+###
 
 def main():
 	st.title('Estimating COVID-19 spread more precisely')
@@ -77,9 +124,10 @@ def main():
 	st.subheader('Plot posterior distribution by state: %s' % state)
 	st.pyplot()
 
-	#
-	st.sidebar.title("Calculate high density interval")
-	r_t_generate = st.sidebar.checkbox("Run!")
+	# Calculate High density interval
+	st.sidebar.title("High density interval estimation for Rt")
+	r_t_generate = st.sidebar.checkbox("Calculate (this may take a while")
+
 	if r_t_generate:
 		hdis = highest_density_interval(posteriors)
 		most_likely = posteriors.idxmax().rename('ML')
@@ -92,21 +140,18 @@ def main():
 		plot_rt(result, fig, ax, state)
 		st.pyplot()
 
-	# Plot all
-	selected_states = st.sidebar.multiselect("Choose other states to compare (this may take a while):",
-									states_names, 
-									default=None)
+	# Select states to plot Rt
+	st.sidebar.title("Compare the results from other states")
+	compare_results = st.sidebar.checkbox("Run (this may take a while)")
 
-	if selected_states:
+	if compare_results:
 
 		#selected_states.append(state)
-		df_filtered = raw_states_df[raw_states_df['state'].isin(selected_states)]
-		results = compute_results_all_states(df_filtered, window, min_periods, gamma, r_t_range)
+		#df_filtered = raw_states_df[raw_states_df['state'].isin(states_names)]
+		results = compute_results_all_states(raw_states_df, state, window, min_periods, gamma, r_t_range)
 		
-		if len(selected_states) > 3:
-			ncols = 4
-		else:
-			ncols = 3
+		ncols = 4
+		ncols = 3
 
 		nrows = int(np.ceil(len(results) / ncols))
 		# fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(15, nrows*3))
@@ -117,6 +162,27 @@ def main():
 		fig.set_facecolor('w')
 		st.pyplot()
 
+		overall = get_overall_results(results)
+
+		filtered = overall.index.get_level_values(0).isin(FILTERED_REGIONS)
+		mr = overall.loc[~filtered].groupby(level=0)[['ML', 'High', 'Low']].last()
+
+		mr.sort_values('ML', inplace=True)
+		fig, axes = plot_standings(mr)
+		st.pyplot()
+
+		mr.sort_values('High', inplace=True)
+		fig, axes = plot_standings(mr)
+		st.pyplot()
+
+		show = mr[mr.High.le(1.1)].sort_values('ML')
+		fig, ax = plot_standings(show, title='Likely Under Control')
+		st.pyplot()
+
+		show = mr[mr.Low.ge(1.05)].sort_values('Low')
+		fig, ax = plot_standings(show, title='Likely Not Under Control');
+		ax.get_legend().remove()
+		st.pyplot()
 
 # Cache raw data
 @st.cache(show_spinner=False)
@@ -134,7 +200,6 @@ def load_data(FILE):
 @st.cache(show_spinner=False)
 def prepare_cases(cases):
     new_cases = cases.diff()
-
     smoothed = new_cases.rolling(7,
         win_type='gaussian',
         min_periods=1,
@@ -153,9 +218,14 @@ def prepare_cases(cases):
 
 # Cache smoothed results
 @st.cache(show_spinner=False)
-def select_cases(raw_states_df, state):
+def get_info_states(raw_states_df, state):
 	states_df = raw_states_df.groupby(['state','date']).sum()
 	states = states_df.squeeze()
+	return states
+
+@st.cache(show_spinner=False)
+def select_cases(raw_states_df, state):
+	states = get_info_states(raw_states_df, state)
 	cases = states.xs(state).rename(f"{state} cases")
 	original, smoothed = prepare_cases(cases)
 	return original, smoothed
@@ -287,15 +357,14 @@ def plot_rt(result, fig, ax, state):
 	ax.xaxis.set_major_locator(mdates.WeekdayLocator())
 	ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
 
-def compute_results_all_states(raw_states_df, window, min_periods, gamma, r_t_range):
+def compute_results_all_states(raw_states_df, state, window, min_periods, gamma, r_t_range):
 	FILTERED_REGIONS = []
 
 	results = {}
 
-	states_df = raw_states_df.groupby(['state', 'date']).sum()
-	states = states_df.squeeze()
+	states = get_info_states(raw_states_df, state)
 
-	states_to_process = states.loc[~states.index.get_level_values('state').isin(FILTERED_REGIONS)]
+	states_to_process = states
 
 	for state_name, cases in states_to_process.groupby(level='state'):
 		print(f'Processing {state_name}')
@@ -307,10 +376,70 @@ def compute_results_all_states(raw_states_df, window, min_periods, gamma, r_t_ra
 
 		print('\tGetting most likely values')
 		most_likely = posteriors.idxmax().rename('ML')
-		result = pd.concat([most_likely, hdis], axis=1)
+		result = pd.concat([most_likely, hdis], axis=1, ignore_index=True)
 		results[state_name] = result.droplevel(0)
 
 	return results
+
+def get_overall_results(results):
+	overall = None
+
+	for state_name, result in results.items():
+	    r = result.copy()
+	    r.index = pd.MultiIndex.from_product([[state_name], result.index])
+	    if overall is None:
+	        overall = r
+	    else:
+	        overall = pd.concat([overall, r])
+
+	overall.sort_index(inplace=True)
+	
+	return overall
+
+def plot_standings(mr, figsize=None, title='Most Recent $R_t$ by State'):
+    if not figsize:
+        figsize = ((15.9/50)*len(mr)+.1,2.5)
+        
+    fig, ax = plt.subplots(figsize=figsize)
+
+    ax.set_title(title)
+    err = mr[['Low', 'High']].sub(mr['ML'], axis=0).abs()
+    bars = ax.bar(mr.index,
+                  mr['ML'],
+                  width=.825,
+                  color=FULL_COLOR,
+                  ecolor=ERROR_BAR_COLOR,
+                  capsize=2,
+                  error_kw={'alpha':.5, 'lw':1},
+                  yerr=err.values.T)
+
+    for bar, state_name in zip(bars, mr.index):
+        if state_name in no_lockdown:
+            bar.set_color(NONE_COLOR)
+        if state_name in partial_lockdown:
+            bar.set_color(PARTIAL_COLOR)
+
+    labels = mr.index.to_series().replace({'District of Columbia':'DC'})
+    ax.set_xticklabels(labels, rotation=90, fontsize=11)
+    ax.margins(0)
+    ax.set_ylim(0,2.)
+    ax.axhline(1.0, linestyle=':', color='k', lw=1)
+
+    leg = ax.legend(handles=[
+                        Patch(label='Full', color=FULL_COLOR),
+                        Patch(label='Partial', color=PARTIAL_COLOR),
+                        Patch(label='None', color=NONE_COLOR)
+                    ],
+                    title='Lockdown',
+                    ncol=3,
+                    loc='upper left',
+                    columnspacing=.75,
+                    handletextpad=.5,
+                    handlelength=1)
+
+    leg._legend_box.align = "left"
+    fig.set_facecolor('w')
+    return fig, ax
 
 if __name__ == "__main__":
 	main()
